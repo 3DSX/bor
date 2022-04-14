@@ -107,6 +107,14 @@ func (api *PublicFilterAPI) timeoutLoop(timeout time.Duration) {
 	}
 }
 
+func doTxMapping(txns []*types.Transaction, f func(*types.Transaction) common.Hash) []common.Hash {
+	mappedTxns := make([]common.Hash, len(txns))
+	for i, v := range txns {
+		mappedTxns[i] = f(v)
+	}
+	return mappedTxns
+}
+
 // NewPendingTransactionFilter creates a filter that fetches pending transaction hashes
 // as transactions enter the pending state.
 //
@@ -116,7 +124,7 @@ func (api *PublicFilterAPI) timeoutLoop(timeout time.Duration) {
 // https://eth.wiki/json-rpc/API#eth_newpendingtransactionfilter
 func (api *PublicFilterAPI) NewPendingTransactionFilter() rpc.ID {
 	var (
-		pendingTxs   = make(chan []common.Hash)
+		pendingTxs   = make(chan []*types.Transaction)
 		pendingTxSub = api.events.SubscribePendingTxs(pendingTxs)
 	)
 
@@ -127,10 +135,13 @@ func (api *PublicFilterAPI) NewPendingTransactionFilter() rpc.ID {
 	go func() {
 		for {
 			select {
-			case ph := <-pendingTxs:
+			case ptxn := <-pendingTxs:
+				h := doTxMapping(ptxn, func(txn *types.Transaction) common.Hash {
+					return txn.Hash()
+				})
 				api.filtersMu.Lock()
 				if f, found := api.filters[pendingTxSub.ID]; found {
-					f.hashes = append(f.hashes, ph...)
+					f.hashes = append(f.hashes, h...)
 				}
 				api.filtersMu.Unlock()
 			case <-pendingTxSub.Err():
@@ -156,16 +167,16 @@ func (api *PublicFilterAPI) NewPendingTransactions(ctx context.Context) (*rpc.Su
 	rpcSub := notifier.CreateSubscription()
 
 	go func() {
-		txHashes := make(chan []common.Hash, 128)
-		pendingTxSub := api.events.SubscribePendingTxs(txHashes)
+		txs := make(chan []*types.Transaction, 128)
+		pendingTxSub := api.events.SubscribePendingTxs(txs)
 
 		for {
 			select {
-			case hashes := <-txHashes:
+			case transactions := <-txs:
 				// To keep the original behaviour, send a single tx hash in one notification.
 				// TODO(rjl493456442) Send a batch of tx hashes in one notification
-				for _, h := range hashes {
-					notifier.Notify(rpcSub.ID, h)
+				for _, t := range transactions {
+					notifier.Notify(rpcSub.ID, t)
 				}
 			case <-rpcSub.Err():
 				pendingTxSub.Unsubscribe()
